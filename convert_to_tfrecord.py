@@ -6,42 +6,65 @@ import os
 import pdb
 import numpy as np
 
+import utils
+from config import config
+
 # configurations
-data_dir = "./data/libffm_toy"
-tr_path = os.path.join(data_dir,"criteo.tr.r100.gbdt0.ffm")
-va_path = os.path.join(data_dir,"criteo.va.r100.gbdt0.ffm")
-read_names=[tr_path,va_path]
+data_dir = config.libffm_data_dir
+tr_path = config.tr_path
+va_path = config.va_path
+read_names= config.read_names
+save_names = config.save_names
 
 def main():
-    # field num,feature num, train set num, validate set num
-    data_stat = [0,0,0,0]
+    # first loop, encode feature to feature_id
+    print("Encode features...")
+    feature_id = []
+    for name in read_names:
+        f = open(name,"r")
+        for row in f.readlines():
+                feature,value,label = process_sample(row)
+                feature_id.extend(feature)
 
-    # save path
-    save_names = [os.path.join("./data","{}.tfrecord".format(k)) for k in ["criteo.tr","criteo.va"]]
-    
+        f.close()
+        feature_id = np.unique(feature_id).tolist()
+    print("Encode feature done.")
+
+    # save feat_id map dict
+    feat_id_dict = dict()
+    for i,feat_ in enumerate(feature_id):
+        feat_id_dict[feat_] = i
+    utils.pickle_save(config.feat_map_filename,feat_id_dict)
+    print("Convert to tfrecord...")
+
+    # second loop, save tfrecord file, use dict to encode feature id
+    data_stat = [0,0]     # field num,feature num, train set num, validate set num
+    # save path    
     for i,filename in enumerate(zip(read_names,save_names)):
         read_name,save_name = filename
         print("Read from {}\nSave in {}".format(read_name,save_name))
         with tf.python_io.TFRecordWriter(save_name) as tfrecord_writer:
             f = open(read_name,"r")
             for count,row in enumerate(f.readlines()):
-                feature,value,label = process_sample(row,data_stat)
+                feature,value,label = process_sample(row)
+                feature = encode_feature(feature,feat_id_dict)
                 example = convert_to_example(feature,value,label)
                 tfrecord_writer.write(example.SerializeToString())
             if i == 0:
-                data_stat[2] = count+1
+                data_stat[0] = count+1
             else:
-                data_stat[3] = count+1
+                data_stat[1] = count+1
             f.close()
 
+    print("Convert Done.")
     print("\n=======================> dataset summary <================================\n")
-    print("[Train set]:",data_stat[2])
-    print("[Validate set]:",data_stat[3])
-    print("[Number of field]: ",data_stat[0])
-    print("[Number of feature]",data_stat[1])
+    print("[Train set]:",data_stat[0])
+    print("[Validate set]:",data_stat[1])
+    print("[Number of field]: ",len(feature))
+    print("[Number of feature]",len(feature_id))
     print("\n=======================> dataset summary <================================\n")
 
-def process_sample(row,data_stat=[0,0,0,0]):
+def process_sample(row):
     row = row.split()
     label = int(row[0])
     feature = []
@@ -50,14 +73,12 @@ def process_sample(row,data_stat=[0,0,0,0]):
        feature.append(int(pair.split(":")[1]))
        value.append(float(pair.split(":")[2]))
 
-    max_feature = np.max(feature)
-    max_field = len(feature)
-    if max_feature > data_stat[1]:
-        data_stat[1] = max_feature
-    if max_field > data_stat[0]:
-        data_stat[0] = max_field
-
     return feature,value,label
+
+def encode_feature(feature,feat_id_dict):
+    for i in range(len(feature)):
+        feature[i] = feat_id_dict[feature[i]]
+    return feature
 
 def convert_to_example(feature,value,label):
     example = tf.train.Example(
