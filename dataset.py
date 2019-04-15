@@ -29,7 +29,11 @@ class Dataset():
             tf_filenames = [tf_filenames]
 
         dataset = tf.data.TFRecordDataset(tf_filenames)
-        dataset = dataset.map(self.parse_function)
+
+        if self.config.sparse_ffm == False: # not sparse tensor
+            dataset = dataset.map(self.parse_function)
+        else: # sparse tensor
+            dataset = dataset.map(self.sparse_parse_function)
 
         if mode in ["train"]:
             dataset = dataset.shuffle(buffer_size=config.batch_size * 10)
@@ -58,12 +62,27 @@ class Dataset():
         }
         return result
 
+    def sparse_parse_function(self,example_proto):
+        keys_to_features = {
+            "feature": tf.VarLenFeature(dtype=tf.int64),
+            "value": tf.VarLenFeature(dtype=tf.float32),
+            "label": tf.FixedLenFeature(shape=[1,],dtype=tf.int64),
+        }
+        parsed = tf.parse_single_example(example_proto, keys_to_features)
+        result = {
+            "feature":parsed["feature"],
+            "value":parsed["value"],
+            "label":parsed["label"],
+        }
+        return result
+
 def main():
     from config import config
     dataloader = Dataset(config)
     data = dataloader.get_dataset(config.val_filename,"val")
     sess = tf.Session()
-    sess.run(label)
+    sess.run(data)
+    pdb.set_trace()
     return
 
 if __name__ == '__main__':

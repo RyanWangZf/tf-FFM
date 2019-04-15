@@ -13,6 +13,7 @@ class Config():
     save_names =  [os.path.join("./data","{}.tfrecord".format(k)) for k in ["criteo.tr","criteo.va"]]
 
     # for ffm.py
+    sparse_ffm = True
     model_dir = "./ckpt"
     log_dir = "./log"
     data_dir = "./data"
@@ -21,8 +22,8 @@ class Config():
     feat_map_filename = os.path.join(data_dir,"feat_id.pkl")
 
     """dataset statistic"""
-    field_num = 39 # f
-    feature_num = 303943 # n
+    field_num = 39 # val_filename
+    feature_num = 303943 # num_epoch
     embedding_num = 4 # k
 
     """train setup"""
@@ -31,10 +32,10 @@ class Config():
     num_epoch = 2
     early_stop_patience = 5
     l2_param = 0.0002
-    batch_size = 512
+    batch_size = 32
 
     """val and test setup"""
-    val_batch_size = 1
+    val_batch_size = 2
 
     """others"""
     num_cpu = 2

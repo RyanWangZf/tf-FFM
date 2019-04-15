@@ -7,7 +7,6 @@ TODO:
 
 """
 # -*- coding: utf-8 -*-
-
 import tensorflow as tf
 import numpy as np
 import pdb
@@ -18,8 +17,7 @@ import utils
 class FFM(object):
     def __init__(self,config):
         self.config = config
-        self.feature_id_map = utils.pickle_load(config.feat_map_filename)
-
+        
     def build_model(self):
         config = self.config
 
@@ -33,15 +31,39 @@ class FFM(object):
         self.logit,self.pred = self.inference(self.inputs_feature,self.inputs_value)
         self.losses = self.loss_function(self.logit,self.label)
 
+        params = tf.trainable_variables()
         optimizer = tf.train.AdagradOptimizer(learning_rate=config.learning_rate)
-        grad = optimizer.compute_gradients(self.losses)
-        # grad = tf.clip_by_value(grad, clip_value_min=,clip_value_max=10.0, name="cliped_grad")
-        # TODO apply gradient clip
+        grad = tf.gradients(self.losses,params,colocate_gradients_with_ops=True)
 
-        self.train_op = optimizer.apply_gradients(grad)
+        # clip gradients
+        clipped_grads,grad_norm = tf.clip_by_global_norm(grad,5.0)
 
-    def train(self,data_element):
-        
+        self.train_op = optimizer.apply_gradients(zip(clipped_grads,params))
+
+    def train(self,train_data):
+        config = self.config
+        sess_config = tf.ConfigProto(
+                device_count = {"CPU":config.num_cpu}, # num of cpu to be used
+                inter_op_parallelism_threads=0, # auto select
+                intra_op_parallelism_threads=0, # auto select
+                )
+        self.sess = tf.Session(config=sess_config)
+        init = tf.global_variables_initializer()
+        self.sess.run(init)
+        epoch = 0
+        while True:
+            try:
+                data = self.sess.run(train_data)
+            except  tf.errors.OutOfRangeError:
+                break
+            feed_dict={
+                self.label:data["label"],
+                self.inputs_feature:data["feature"],
+                self.inputs_value:data["value"]}
+
+            batch_loss,_ = self.sess.run([self.losses,self.train_op],feed_dict)
+            epoch += 1
+            print("batch {}, loss {}".format(epoch,batch_loss))
         return
 
     def loss_function(self,logit,label):
@@ -125,8 +147,13 @@ class FFM(object):
 
 def main():
     from config import config
+    from dataset import Dataset
     ffm = FFM(config)
-    pdb.set_trace()
+    dataloader = Dataset(config)
+    data = dataloader.get_dataset(config.train_filename,"train")
+    ffm.build_model()
+    ffm.train(data)
+
 
 if __name__ == '__main__':
     main()
