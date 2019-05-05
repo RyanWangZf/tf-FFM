@@ -42,6 +42,7 @@ class FFM:
 		# training
 		for step in range(config.num_epoch):
 			for epoch in range(num_iter_one_epoch):
+
 				batch_data = dataset.get_batch()
 				batch_feature = batch_data[1]
 				batch_label = batch_data[3]
@@ -50,20 +51,17 @@ class FFM:
 						feed_dict = {self.features:batch_feature,self.label:batch_label})
 
 				sys.stdout.write("\r")
-				sys.stdout.write("=> [INFO] Process {:.0%} in Step {:d}: Train log-loss: {:.2f} <= \r".format(epoch/num_iter_one_epoch, step+1,batch_logloss))
+				sys.stdout.write("=> [INFO] Process {:.0%} in Step {:d}: [Train] log-loss: {:.5f} <= \r".format(epoch/num_iter_one_epoch, step+1,batch_logloss))
 				sys.stdout.flush()
-				# debug
-				if epoch == 1000:
-					break
 
 			# validation
 			if va_dataset is not None:
 				va_loss = self.sess.run(self.log_loss,
 					feed_dict={self.features:va_data["feature"],self.label:va_data["label"]})
-				print("=> STEP {}, val_loss: {:.4f} <=".format(step+1,va_loss))
+				print("\n => STEP {}, val_loss: {:.5f} <=".format(step+1,va_loss))
 
 			# save model
-			saver.save(self.sess,config.model_dir,global_step=step+1)
+			saver.save(self.sess,config.model_dir+"/ffm.ckpt",global_step=step+1)
 
 		return
 
@@ -76,7 +74,7 @@ class FFM:
 				weights = tf.get_variable("weights",
 					shape=[config.n,1],
 					dtype=tf.float32,
-					initializer=tf.truncated_normal_initializer(stddev=0.01,mean=0)) # [n,1]
+					initializer=tf.truncated_normal_initializer(stddev=0.1,mean=0)) # [n,1]
 
 				bias = tf.get_variable("bias",
 					shape=[1],
@@ -85,6 +83,7 @@ class FFM:
 
 				linear_term = tf.gather(weights,self.features) # [None,m,1]
 				linear_term = tf.add(bias, tf.reduce_sum(linear_term,[-1,-2])) # [None,]
+				# linear_term = tf.reduce_sum(linear_term,[-1,-2]) # [None,]
 
 				tf.add_to_collection(tf.GraphKeys.WEIGHTS,weights)
 				tf.add_to_collection(tf.GraphKeys.WEIGHTS,bias)
@@ -93,7 +92,7 @@ class FFM:
 				embedding = tf.get_variable("embedding",
 					shape=[config.n,config.m,config.k],
 					dtype=tf.float32,
-					initializer=tf.truncated_normal_initializer(stddev=0.01,mean=0)) # [n,m,k]
+					initializer=tf.truncated_normal_initializer(stddev=0.1,mean=0)) # [n,m,k]
 
 				quad_term = tf.gather(embedding,self.features)
 				quad_term = tf.reduce_sum(quad_term * tf.transpose(quad_term,[0,2,1,3]),-1) # [None,m,m]
@@ -118,16 +117,17 @@ class FFM:
 
 		with tf.name_scope("logistic_loss"):
 			# logistic loss
-			logit_1 = tf.log(self.prob + 1e-20)
-			logit_0 = tf.log(1 - self.prob + 1e-20)
+			logit_1 = tf.log(self.prob + 1e-10)
+			logit_0 = tf.log(1 - self.prob + 1e-10)
 			self.log_loss = -1 * tf.reduce_mean(self.label * logit_1 + (1- self.label) * logit_0)
+
 
 		self.loss = self.log_loss + reg_term
 
 	def _optimizer(self):
 		config = self.config
 		# build optimizer
-		opt = tf.train.AdamOptimizer(config.learning_rate)
+		opt = tf.train.AdagradOptimizer(config.learning_rate)
 
 		# build train op
 		params = tf.trainable_variables()
@@ -143,11 +143,10 @@ def main():
 	ffm = FFM(config)
 	ffm.build()
 
-	from dataset import DataSet
+	from dataset import DataSet, DatasetTF
 	tr_filename = "data/criteo.tr.r100.gbdt0.ffm"
 	va_filename = "data/criteo.va.r100.gbdt0.ffm"
 	dataset = DataSet(tr_filename,config.batch_size,config.shuffle)
-
 	va_dataset = DataSet(va_filename)
 
 	ffm.train(dataset,va_dataset)
