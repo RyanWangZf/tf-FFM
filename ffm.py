@@ -1,231 +1,161 @@
-"""Tensorflow based Field-aware Factorization Machine.
-
-TODO:
-    1. early stopping
-    2. model save and test
-    3. write log and visualize training process
-
-"""
 # -*- coding: utf-8 -*-
-
 import tensorflow as tf
-import numpy as np
+import sys
 import pdb
-import os
 
-from config import config
-from dataset import Dataset
+class FFM:
 
-model_dir = config.model_dir
-log_path = config.log_dir
-data_dir = config.data_dir
-train_dir = config.train_filename
-val_dir = config.val_filename
+	def __init__(self,config):
+		self.config = config
 
-sess_config = tf.ConfigProto(device_count = {"CPU":config.num_cpu}, # num of cpu to be used
-    inter_op_parallelism_threads=0, # auto select
-    intra_op_parallelism_threads=0, # auto select
-    )
+	def build(self):
+		# build components
+		self._inference()
+		self._loss_func()
+		self._optimizer()
 
-class FFM(object):
-    def __init__(self):
-        self.feature_id_map = utils.pickle_load(config.feat_map_filename)
-        
-    def inference(self,inputs_feature,inputs_value):
-            """With inputs placeholder, do inference and get predictions.
-        predict = b0 + sum(Vi * feature_i) + sum(Vij * Vji * feature_i * feature_j)
+		# build session
+		sess_config = tf.ConfigProto(device_count = {"CPU":self.config.num_cpu},
+			inter_op_parallelism_threads=0,
+			intra_op_parallelism_threads=0)
+		self.sess = tf.Session(config=sess_config)
 
-        Args:
-            inputs_feature: a tensor of input feature idx in each field, shape [None,num_field]
-            inputs_value: a tensor of input value of each feature, shape [None,num_field]
-        Returns:
-            logit: output logits tensor with shape [batch_size,1]
-            pred: predictions with shape [batch_size,1]
-        """
-        # map input feature
-        inputs_feature = self.parse_feature_id(inputs_feature)
+	def train(self,dataset,va_dataset=None):
+		if va_dataset is not None:
+			va_data = va_dataset.get_all_data()
 
-        # build linear term
-        with tf.variable_scope("linear"):
-            weights = tf.get_variable("weights",
-                shape=[feature_num,1],
-                dtype=tf.float32,
-                initializer=tf.truncated_normal_initializer(stddev=0.01,mean=0)) # [n,1]
+		config = self.config
+		sample_total_num = len(dataset.raw_data)
+		num_iter_one_epoch = sample_total_num // config.batch_size
 
-            bias = tf.get_variable("bias",
-                shape=[1,1],
-                dtype=tf.float32,
-                initializer=tf.zeros_initializer())
+		# restore model
+		self.sess.run([tf.global_variables_initializer(),tf.local_variables_initializer()])
+		var_list = tf.contrib.framework.get_variables_to_restore(include=["ffm"])
+		try:
+			saver_to_restore = tf.train.Saver(var_list=var_list)
+			saver_to_restore.restore(self.sess,config.model_dir)
+		except:
+			print("[INFO] Cannot find saved checkpoint in {}.".format(config.model_dir))
 
-            batch_weights = tf.nn.embedding_lookup(weights,inputs_feature) # [None,f,1]
-            batch_weights = tf.squeeze(batch_weights,axis=2) # [None,f]
+		saver = tf.train.Saver(max_to_keep=2)
 
-            linear_term = tf.multiply(inputs_value,batch_weights) # [None,f]
-            linear_term = tf.reduce_sum(linear_term,axis=1,keepdims=True) # [None,1]
-            linear_term = tf.add(linear_term,bias) # [None,1]
+		# training
+		for step in range(config.num_epoch):
+			for epoch in range(num_iter_one_epoch):
+				batch_data = dataset.get_batch()
+				batch_feature = batch_data[1]
+				batch_label = batch_data[3]
 
-        # build quadratic term
-        with tf.variable_scope("quad"):
-            embeddings = tf.get_variable("embeddings",
-                shape=[field_num,feature_num,embedding_num],
-                dtype=tf.float32,
-                initializer=tf.truncated_normal_initializer(stddev=0.01,mean=0)) # [f,n,k]
+				batch_loss,_,batch_logloss = self.sess.run([self.loss,self.train_op,self.log_loss],
+						feed_dict = {self.features:batch_feature,self.label:batch_label})
 
-            quad_term = None
-            for i in range(field_num):
-                for j in range(i+1,field_num):
-                    vi_fj = tf.nn.embedding_lookup(embeddings[j],inputs_feature[:,i]) # [None,k]
-                    vj_fi = tf.nn.embedding_lookup(embeddings[i],inputs_feature[:,j]) # [None,k]
-                    wij = tf.multiply(vi_fj,vj_fi) # [None,k]
+				sys.stdout.write("\r")
+				sys.stdout.write("=> [INFO] Process {:.0%} in Step {:d}: Train log-loss: {:.2f} <= \r".format(epoch/num_iter_one_epoch, step+1,batch_logloss))
+				sys.stdout.flush()
+				# debug
+				if epoch == 1000:
+					break
 
-                    x_i = tf.expand_dims(inputs_value[:,i],1) # [None,1]
-                    x_j = tf.expand_dims(inputs_value[:,j],1) # [None,1]
-                    xij = tf.multiply(x_i,x_j) # [None,1]
+			# validation
+			if va_dataset is not None:
+				va_loss = self.sess.run(self.log_loss,
+					feed_dict={self.features:va_data["feature"],self.label:va_data["label"]})
+				print("=> STEP {}, val_loss: {:.4f} <=".format(step+1,va_loss))
 
-                    if quad_term is None:
-                        quad_term = tf.reduce_sum(tf.multiply(wij,xij),axis=1,keepdims=True)
-                    else:
-                        quad_term = tf.add(quad_term,tf.reduce_sum(tf.multiply(wij,xij),axis=1,keepdims=True))
-        
-        # build predictions
-        with tf.variable_scope("output"):
-            logit = tf.add(linear_term,quad_term,name="logit")
-            pred = tf.nn.sigmoid(logit,name="pred")
+			# save model
+			saver.save(self.sess,config.model_dir,global_step=step+1)
 
-        return logit,pred
+		return
 
-    def parse_feature_id(self,inputs_feature):
-        def func(inputs):
-            pdb.set_trace()
-            return inputs
-        return tf.py_func(func,[inputs_feature],tf.int64)
+	def _inference(self):
+		config = self.config
+		self.label = tf.placeholder(shape=(None),dtype=tf.float32)
+		self.features = tf.placeholder(shape=(None,config.m),dtype=tf.int32)
+		with tf.variable_scope("ffm"):
+			with tf.variable_scope("linear"):
+				weights = tf.get_variable("weights",
+					shape=[config.n,1],
+					dtype=tf.float32,
+					initializer=tf.truncated_normal_initializer(stddev=0.01,mean=0)) # [n,1]
+
+				bias = tf.get_variable("bias",
+					shape=[1],
+					dtype=tf.float32,
+					initializer=tf.zeros_initializer())
+
+				linear_term = tf.gather(weights,self.features) # [None,m,1]
+				linear_term = tf.add(bias, tf.reduce_sum(linear_term,[-1,-2])) # [None,]
+
+				tf.add_to_collection(tf.GraphKeys.WEIGHTS,weights)
+				tf.add_to_collection(tf.GraphKeys.WEIGHTS,bias)
+
+			with tf.variable_scope("quadratic"):
+				embedding = tf.get_variable("embedding",
+					shape=[config.n,config.m,config.k],
+					dtype=tf.float32,
+					initializer=tf.truncated_normal_initializer(stddev=0.01,mean=0)) # [n,m,k]
+
+				quad_term = tf.gather(embedding,self.features)
+				quad_term = tf.reduce_sum(quad_term * tf.transpose(quad_term,[0,2,1,3]),-1) # [None,m,m]
+				temp = []
+				for i in range(config.m):
+					if i != 0:
+						temp.append(quad_term[:,i,:i])
+				quad_term = tf.reduce_sum(tf.concat(temp,-1),-1) # [None,]
+
+				tf.add_to_collection(tf.GraphKeys.WEIGHTS,embedding)
+
+			logit = linear_term + quad_term
+			self.prob = tf.sigmoid(logit)
+
+	def _loss_func(self):
+		config = self.config
+
+		with tf.name_scope("l2_loss"):
+			# l2 normalization
+			regularizer = tf.contrib.layers.l2_regularizer(config.l2_norm)
+			reg_term = tf.contrib.layers.apply_regularization(regularizer,weights_list=None)
+
+		with tf.name_scope("logistic_loss"):
+			# logistic loss
+			logit_1 = tf.log(self.prob + 1e-20)
+			logit_0 = tf.log(1 - self.prob + 1e-20)
+			self.log_loss = -1 * tf.reduce_mean(self.label * logit_1 + (1- self.label) * logit_0)
+
+		self.loss = self.log_loss + reg_term
+
+	def _optimizer(self):
+		config = self.config
+		# build optimizer
+		opt = tf.train.AdamOptimizer(config.learning_rate)
+
+		# build train op
+		params = tf.trainable_variables()
+		gradients = tf.gradients(self.loss,params,colocate_gradients_with_ops=True)
+		clipped_grads, gradient_norm = tf.clip_by_global_norm(gradients, 5.0)
+		self.grad_norm = gradient_norm
+		self.train_op = opt.apply_gradients(zip(clipped_grads, params))
+
 
 def main():
+	from config import config
 
-    """
-    Train phase
-    """
-    # define dataset  and inputs
-    train_iterator = Dataset(config).get_dataset(config.train_filename,mode="train")
-    train_inputs = train_iterator.get_next()
-    # do inference
-    logit,pred = inference(train_inputs["feature"],train_inputs["value"])
-    # pdb.set_trace()
-    # loss function
-    loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.cast(train_inputs["label"],tf.float32),logits=logit)
-    loss = tf.reduce_mean(loss)
-    # train op
-    optimizer = tf.train.AdagradOptimizer(learning_rate=config.learning_rate)
-    grad = optimizer.compute_gradients(loss)
-    train_op = optimizer.apply_gradients(grad)
+	ffm = FFM(config)
+	ffm.build()
 
-    """
-    Validation phase
-    """
+	from dataset import DataSet
+	tr_filename = "data/criteo.tr.r100.gbdt0.ffm"
+	va_filename = "data/criteo.va.r100.gbdt0.ffm"
+	dataset = DataSet(tr_filename,config.batch_size,config.shuffle)
 
-    # auc = tf.metrics.auc(labels=label,predictions=pred,name="tr_auc")
-    # acc = tf.metrics.accuracy(labels=label,
-    #         predictions=tf.cast(pred>threshold,tf.float32),
-    #         name="tr_accuracy")
+	va_dataset = DataSet(va_filename)
 
-    with tf.Session(config=sess_config) as sess:
-        # summary writer
-        # tf.summary.scalar("tr_losses",loss)
-        # tf.summary.scalar("tr_auc",auc[1])
-        # tf.summary.scalar("tr_accuracy",acc[1])
-        # merged = tf.summary.merge_all()
-        # writer = tf.summary.FileWriter(log_path,sess.graph)
+	ffm.train(dataset,va_dataset)
 
-        sess.run(tf.global_variables_initializer())
-        while True:
-            batch_loss,_ = sess.run([loss,train_op])
-            print(batch_loss)
-        # get batch data
-        # ...
-
-        # train
-        # ...
-
-        # validate every %d epoch
-        # ...
-
-        # do early stop and save best model every %d epoch
-        # ...
+	pdb.set_trace()
 
 
-    pdb.set_trace()
-    pass
-
-def inference(inputs_feature,inputs_value):
-    """With inputs placeholder, do inference and get predictions.
-    predict = b0 + sum(Vi * feature_i) + sum(Vij * Vji * feature_i * feature_j)
-
-    Args:
-        inputs_feature: a tensor of input feature idx in each field, shape [None,num_field]
-        inputs_value: a tensor of input value of each feature, shape [None,num_field]
-    Returns:
-        logit: output logits tensor with shape [batch_size,1]
-        pred: predictions with shape [batch_size,1]
-    """
-    # map input feature
-    inputs_feature = tf_map_feature(inputs_feature)
-
-    # build linear term
-    with tf.variable_scope("linear"):
-        weights = tf.get_variable("weights",
-            shape=[feature_num,1],
-            dtype=tf.float32,
-            initializer=tf.truncated_normal_initializer(stddev=0.01,mean=0)) # [n,1]
-
-        bias = tf.get_variable("bias",
-            shape=[1,1],
-            dtype=tf.float32,
-            initializer=tf.zeros_initializer())
-
-        batch_weights = tf.nn.embedding_lookup(weights,inputs_feature) # [None,f,1]
-        batch_weights = tf.squeeze(batch_weights,axis=2) # [None,f]
-
-        linear_term = tf.multiply(inputs_value,batch_weights) # [None,f]
-        linear_term = tf.reduce_sum(linear_term,axis=1,keepdims=True) # [None,1]
-        linear_term = tf.add(linear_term,bias) # [None,1]
-
-    # build quadratic term
-    with tf.variable_scope("quad"):
-        embeddings = tf.get_variable("embeddings",
-            shape=[field_num,feature_num,embedding_num],
-            dtype=tf.float32,
-            initializer=tf.truncated_normal_initializer(stddev=0.01,mean=0)) # [f,n,k]
-
-        quad_term = None
-        for i in range(field_num):
-            for j in range(i+1,field_num):
-                vi_fj = tf.nn.embedding_lookup(embeddings[j],inputs_feature[:,i]) # [None,k]
-                vj_fi = tf.nn.embedding_lookup(embeddings[i],inputs_feature[:,j]) # [None,k]
-                wij = tf.multiply(vi_fj,vj_fi) # [None,k]
-
-                x_i = tf.expand_dims(inputs_value[:,i],1) # [None,1]
-                x_j = tf.expand_dims(inputs_value[:,j],1) # [None,1]
-                xij = tf.multiply(x_i,x_j) # [None,1]
-
-                if quad_term is None:
-                    quad_term = tf.reduce_sum(tf.multiply(wij,xij),axis=1,keepdims=True)
-                else:
-                    quad_term = tf.add(quad_term,tf.reduce_sum(tf.multiply(wij,xij),axis=1,keepdims=True))
-    
-    # build predictions
-    with tf.variable_scope("output"):
-        logit = tf.add(linear_term,quad_term,name="logit")
-        pred = tf.nn.sigmoid(logit,name="pred")
-
-    return logit,pred
-
-def tf_map_feature(inputs_feature):
-    pass
-
+	return
 
 if __name__ == '__main__':
-    main()
-
-
-
-
+	main()

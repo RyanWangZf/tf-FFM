@@ -1,89 +1,104 @@
 # -*- coding: utf-8 -*-
-import tensorflow as tf 
+import linecache
+import numpy as np
+
+import time
+
 import pdb
-import os
 
-# configurations
-data_dir = "./data"
-train_path = os.path.join(data_dir,"criteo.tr.tfrecord")
-val_path = os.path.join(data_dir,"criteo.va.tfrecord")
+class DataSet(object):
+	def __init__(self,filename,batch_size=None,shuffle=True):
+		self.filename = filename
+		self.total_num = self._count_data_len(filename)
+		self.raw_data = linecache.getlines(filename)
+		if batch_size is not None:
+			self.batch_gen = self._batch_generator(batch_size,shuffle)
 
-class Dataset():
-    def __init__(self,config):
-        self.config = config
+	def get_batch(self):
+		return self.batch_gen.__next__()
 
-    def get_dataset(self,tf_filenames,mode="train"):
-        """Get dataset for training or validation, us tf.data.TFRecordDataset(),
-        can switch between train and validation data by `make_initializable_iterator()`.
+	def get_all_data(self):
+		feature_data = []
+		label_data = []
+		for data in self.raw_data:
+			_,feat,_,label = self._parse_line(data)
+			feature_data.append(feat)
+			label_data.append(label)
 
-        Args:
-            tf_filenames: a list of *.tfrecord file names.
-            mode: a string set as `train` or `val`.
-        Returns:
-            output batch result from `tf.data.Iterator.get_next()` .
-        """
-        assert mode in ["train","val","test"]
-        config = self.config
+		all_data = {"feature":np.array(feature_data),
+					"label":np.array(label_data)}
+		self.all_data = all_data
+		return self.all_data
 
-        if not isinstance(tf_filenames,list):
-            tf_filenames = [tf_filenames]
+	def stats(self):
+		"""Get statistics of the dataset.
+		"""
+		m = n = 0
+		for data in self.raw_data:
+			field, feat, _, _ = self._parse_line(data)
+			m = max(m, np.max(field) + 1)
+			n = max(n, np.max(feat) + 1)
+		self.total_field = m
+		self.total_feature = n
+		print("-"*10 + ">Data Statistics<" + "-"*10)
+		print("Num of feature", n)
+		print("Num of field", m)
+		return
 
-        dataset = tf.data.TFRecordDataset(tf_filenames)
+	def _batch_generator(self,batch_size,shuffle=True):
+		indices = list(range(self.total_num))
+		if shuffle:
+			np.random.seed(724)
+			np.random.shuffle(indices)
 
-        if self.config.sparse_ffm == False: # not sparse tensor
-            dataset = dataset.map(self.parse_function)
-        else: # sparse tensor
-            dataset = dataset.map(self.sparse_parse_function)
+		batch_count = 0
+		while True:
+			if (batch_count + 1) * batch_size > self.total_num:
+				batch_count = 0
+				if shuffle:
+					np.random.shuffle(indices)
 
-        if mode in ["train"]:
-            dataset = dataset.shuffle(buffer_size=config.batch_size * 10)
-            dataset = dataset.batch(config.batch_size,drop_remainder=False)
-            dataset = dataset.repeat(config.num_epoch)
-        elif mode in ["test","val"]:
-            dataset = dataset.repeat(1)
-            dataset = dataset.batch(config.val_batch_size,drop_remainder=False)
+			start_idx = batch_count * batch_size
+			end_idx = start_idx + batch_size
+			batch_count += 1
 
-        iterator = dataset.make_one_shot_iterator()
-        return iterator.get_next()
+			batch_data = self.raw_data[start_idx:end_idx]
+			batch_field, batch_feature, batch_val, batch_label = [],[],[],[]
+			for b in batch_data:
+				field,feat,val,label = self._parse_line(b)
+				batch_field.append(field)
+				batch_feature.append(feat)
+				batch_val.append(val)
+				batch_label.append(label)
 
-    def parse_function(self,example_proto):
-        field_num = self.config.field_num
-        keys_to_features = {
-            "feature": tf.FixedLenFeature(shape=[field_num,],dtype=tf.int64),
-            "label": tf.FixedLenFeature(shape=[1,],dtype=tf.int64),
-            "value": tf.FixedLenFeature(shape=[field_num,],dtype=tf.float32)
-        }
-        parsed = tf.parse_single_example(example_proto, keys_to_features)
+			yield np.array(batch_field),np.array(batch_feature),\
+				np.array(batch_val),np.array(batch_label)
 
-        result = {
-            "feature":parsed["feature"],
-            "value":parsed["value"],
-            "label":parsed["label"],
-        }
-        return result
+	def _parse_line(self,line):
+		line = line.strip().split()
+		label = int(line[0])
+		line_data = np.array([l.split(":") for l in line[1:]])
+		field_idx = line_data[:,0].astype(int)
+		feat_idx = line_data[:,1].astype(int)
+		vals  = line_data[:,2].astype(np.float32)
+		return field_idx,feat_idx,vals,label
 
-    def sparse_parse_function(self,example_proto):
-        keys_to_features = {
-            "feature": tf.VarLenFeature(dtype=tf.int64),
-            "value": tf.VarLenFeature(dtype=tf.float32),
-            "label": tf.FixedLenFeature(shape=[1,],dtype=tf.int64),
-        }
-        parsed = tf.parse_single_example(example_proto, keys_to_features)
-        result = {
-            "feature":parsed["feature"],
-            "value":parsed["value"],
-            "label":parsed["label"],
-        }
-        return result
+	def _count_data_len(self,filename):
+		with open(filename) as f:
+			nr_of_lines = sum(1 for line in f)
+		return nr_of_lines
+
 
 def main():
-    from config import config
-    dataloader = Dataset(config)
-    data = dataloader.get_dataset(config.val_filename,"val")
-    sess = tf.Session()
-    sess.run(data)
-    pdb.set_trace()
-    return
+	# debug
+	filename = "data/criteo.va.r100.gbdt0.ffm"
+	dataset = DataSet(filename,32,True)
+	for i in range(10):
+		batch = dataset.get_batch()
+	print(batch)
+
+	dataset.stats()
+
 
 if __name__ == '__main__':
-    main()
+	main()
