@@ -1,141 +1,75 @@
-# -*- coding: utf-8 -*-
 import linecache
 import numpy as np
-
 import tensorflow as tf
-import time
-
 import pdb
 
-class DataSet(object):
-	"""A data generator.
+class Dataset(object):
+	"""A data generator based on tf.data.Dataset API.
 	"""
-	def __init__(self,filename,batch_size=None,shuffle=True):
-		self.filename = filename
-		self.total_num = self._count_data_len(filename)
-		self.raw_data = linecache.getlines(filename)
-		self.all_data = None
-		if batch_size is not None:
-			self.batch_gen = self._batch_generator(batch_size,shuffle)
+	def __init__(self,tr_filename,va_filename=None,batch_size=None,shuffle=True):
+		self.all_data = []
+		self.tr_filename = tr_filename
+		self.va_filename = va_filename
+		self.batch_size = batch_size
+		self.shuffle = shuffle
+
+		# create training dataset
+		self._load_and_parse_raw_data(tr_filename)
+		self.feat_plhd = tf.placeholder(dtype = tf.int32,
+			shape = [None,self.all_data[0]["feature"].shape[1]],
+			name = "input_feature")
+		self.label_plhd = tf.placeholder(dtype = tf.float32,
+			shape = [None,],
+			name = "input_label")
+
+		self.train_dataset = tf.data.Dataset.from_tensor_slices((self.feat_plhd,self.label_plhd))
+
+		# create validating dataset
+		if va_filename is not None:
+			self.val_dataset = tf.data.Dataset.from_tensor_slices((self.feat_plhd,self.label_plhd))
+			self._load_and_parse_raw_data(va_filename)
+
+		self._make_init_op()
 
 	def get_batch(self):
-		return self.batch_gen.__next__()
+		return self.next_element
 
-	def get_all_data(self):
-		if self.all_data is None:
-			feature_data = []
-			label_data = []
-			for data in self.raw_data:
-				_,feat,_,label = self._parse_line(data)
-				feature_data.append(feat)
-				label_data.append(label)
+	def init_iterator(self,sess,is_training=True):
+		if is_training:
+			sess.run(self.train_init_op,
+				feed_dict={self.feat_plhd:self.all_data[0]["feature"],
+				self.label_plhd:self.all_data[0]["label"]})
+		else:
+			sess.run(self.val_init_op,
+				feed_dict={self.feat_plhd:self.all_data[1]["feature"],
+				self.label_plhd:self.all_data[1]["label"]})
 
-			all_data = {"feature":np.array(feature_data),
-						"label":np.array(label_data)}
-			self.all_data = all_data
+	def _make_init_op(self):
+		self.train_dataset = self.train_dataset.shuffle(buffer_size=10000)
+		self.train_dataset = self.train_dataset.batch(self.batch_size,drop_remainder=True)
+		self.train_dataset = self.train_dataset.repeat()
 
-		return self.all_data
+		# pdb.set_trace()
+		self.iterator = tf.data.Iterator.from_structure(self.train_dataset.output_types,
+			self.train_dataset.output_shapes)
+		self.train_init_op = self.iterator.make_initializer(self.train_dataset)
 
-	def stats(self):
-		"""Get statistics of the dataset.
-		"""
-		m = n = 0
-		for data in self.raw_data:
-			field, feat, _, _ = self._parse_line(data)
-			m = max(m, np.max(field) + 1)
-			n = max(n, np.max(feat) + 1)
-		self.total_field = m
-		self.total_feature = n
-		print("-"*10 + ">Data Statistics<" + "-"*10)
-		print("Num of feature", n)
-		print("Num of field", m)
-		return
+		if self.va_filename is not None:
+			self.val_dataset = self.val_dataset.batch(8196)
+			self.val_init_op = self.iterator.make_initializer(self.val_dataset)
 
-	def _batch_generator(self,batch_size,shuffle=True):
-		indices = list(range(self.total_num))
-		if shuffle:
-			np.random.seed(724)
-			np.random.shuffle(indices)
+		self.next_element = self.iterator.get_next()
 
-		batch_count = 0
-		while True:
-			if (batch_count + 1) * batch_size > self.total_num:
-				batch_count = 0
-				if shuffle:
-					np.random.shuffle(indices)
-
-			start_idx = batch_count * batch_size
-			end_idx = start_idx + batch_size
-			batch_count += 1
-
-			batch_data = self.raw_data[start_idx:end_idx]
-			batch_field, batch_feature, batch_val, batch_label = [],[],[],[]
-			for b in batch_data:
-				field,feat,val,label = self._parse_line(b)
-				batch_field.append(field)
-				batch_feature.append(feat)
-				batch_val.append(val)
-				batch_label.append(label)
-
-			yield np.array(batch_field),np.array(batch_feature),\
-				np.array(batch_val),np.array(batch_label)
-
-	def _parse_line(self,line):
-		line = line.strip().split()
-		label = int(line[0])
-		line_data = np.array([l.split(":") for l in line[1:]])
-		field_idx = line_data[:,0].astype(int)
-		feat_idx = line_data[:,1].astype(int)
-		vals  = line_data[:,2].astype(np.float32)
-		return field_idx,feat_idx,vals,label
-
-	def _count_data_len(self,filename):
-		with open(filename) as f:
-			nr_of_lines = sum(1 for line in f)
-		return nr_of_lines
-
-
-class  DataSetTF(object):
-	"""A data generator based on tensorflow.data.Dataset API.
-	"""
-	def __init__(self,filename,batch_size=None,shuffle=True):
-		self.filename = filename
-		self.raw_data = linecache.getlines(filename)
-		# create numpy data and tf.data.Dataset
-		self._dataset_initialize()
-		self._dataset_transform(batch_size,shuffle)
-
-	def get_batch(self):
-		return self.iterator.get_next()
-	
-	def init_iterator(self,sess):
-		sess.run(self.iterator.initializer, feed_dict = {
-			self.feat_plhd: self.all_data["feature"],
-			self.label_plhd: self.all_data["label"]})
-
-	def _dataset_initialize(self):
-		print("=> [INFO] Initializing dataset ... <=")
+	def _load_and_parse_raw_data(self,filename):
+		print("=> [INFO] Load and parse raw data from {} ... <=".format(filename))
+		raw_data = linecache.getlines(filename)
 		feature_data = []
 		label_data = []
-		for line in self.raw_data:
+		for line in raw_data:
 			_,feat,_,label = self._parse_line(line)
 			feature_data.append(feat)
 			label_data.append(label)
-		self.all_data = { "feature" : np.array(feature_data), "label" : np.array(label_data)}
-		print("=> [INFO] Dataset is initialized ! <=")
-
-	def _dataset_transform(self,batch_size,shuffle):
-		# self.dataset = tf.data.Dataset.from_tensor_slices(self.all_data)
-		self.feat_plhd = tf.placeholder(tf.int32,self.all_data["feature"].shape)
-		self.label_plhd = tf.placeholder(tf.float32,self.all_data["label"].shape)
-		self.dataset = tf.data.Dataset.from_tensor_slices((self.feat_plhd,self.label_plhd))
-
-		if shuffle:
-			self.dataset = self.dataset.shuffle(buffer_size=100000)
-		self.dataset = self.dataset.batch(batch_size)
-		self.dataset = self.dataset.repeat()
-		# self.iterator = self.dataset.make_one_shot_iterator()
-		self.iterator = self.dataset.make_initializable_iterator()
+		self.all_data.append({ "feature" : np.array(feature_data), "label" : np.array(label_data)})
 
 	def _parse_line(self,line):
 		line = line.strip().split()
@@ -147,29 +81,42 @@ class  DataSetTF(object):
 		return field_idx,feat_idx,vals,label
 
 def main():
-	# debug
-	filename = "data/criteo.va.r100.gbdt0.ffm"
-
-	dataset = DataSetTF(filename,32,True)
-	sess = tf.Session()
-	dataset.init_iterator(sess)
+	"""A tutorial on how to use this dataset API.
+	"""
+	from config import config
+	tr_filename = "data/criteo.tr.r100.gbdt0.ffm"
+	va_filename = "data/criteo.va.r100.gbdt0.ffm"
+	dataset = Dataset(tr_filename,va_filename,config.batch_size,config.shuffle)
 	batch = dataset.get_batch()
-	start_time = time.time()
-	for i in range(10000):
-		res = sess.run(batch)
-	run_time = time.time() - start_time
-	# print(res)
-	print("[datasetTF] Running total time: {:.2f} sec".format(run_time))
-	
-	start_time = time.time()
-	dataset = DataSet(filename,32,True)
-	for i in range(10000):
-		batch = dataset.get_batch()
-	print(batch)
-	run_time = time.time() - start_time
-	print("[dataset] Running total time: {:.2f} sec".format(run_time))
-	# dataset.stats()
 
+	sess = tf.Session()
+	for i in range(10):
+		dataset.init_iterator(sess,True)
+		for j in range(10):
+			print("{}/{}".format(i,j))
+			tr_batch = sess.run(batch)
+
+		dataset.init_iterator(sess,False)
+		va_count = 0
+		try:
+			while True:
+				print("va",va_count)
+				va_batch = sess.run(batch)
+				va_count += 1
+		except tf.errors.OutOfRangeError:
+			print("validate done!")
+
+	print("validation batch size:",va_batch[0].shape)
+	print("training batch size:",tr_batch[0].shape)
+
+	return
 
 if __name__ == '__main__':
 	main()
+
+
+
+
+
+
+		

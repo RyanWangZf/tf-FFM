@@ -1,74 +1,118 @@
 # -*- coding: utf-8 -*-
 import tensorflow as tf
+import numpy as np 
+from sklearn.metrics import roc_auc_score
+
 import sys
 import pdb
 
-class FFM:
+# TODO
+# early stop
+# load and predict
 
+class FFM:
 	def __init__(self,config):
 		self.config = config
-
-	def build(self):
-		# build components
-		self._inference()
-		self._loss_func()
-		self._optimizer()
-
 		# build session
 		sess_config = tf.ConfigProto(device_count = {"CPU":self.config.num_cpu},
 			inter_op_parallelism_threads=0,
 			intra_op_parallelism_threads=0)
 		self.sess = tf.Session(config=sess_config)
 
-	def train(self,dataset,va_dataset=None):
-		if va_dataset is not None:
-			va_data = va_dataset.get_all_data()
-
+	def train(self,dataset):
 		config = self.config
-		sample_total_num = len(dataset.raw_data)
+		# start training
+		sample_total_num = dataset.all_data[0]["feature"].shape[0]
 		num_iter_one_epoch = sample_total_num // config.batch_size
+		feat_tensor,label_tensor = dataset.get_batch()
 
-		# restore model
+		# build graph
+		pred = self._inference(feat_tensor)
+		# pred = self._inference_complex(feat_tensor)
+
+		loss, logloss = self._loss_func(pred,label_tensor)
+		train_op = self._optimizer(loss)
+
 		self.sess.run([tf.global_variables_initializer(),tf.local_variables_initializer()])
-		var_list = tf.contrib.framework.get_variables_to_restore(include=["ffm"])
-		try:
-			saver_to_restore = tf.train.Saver(var_list=var_list)
-			saver_to_restore.restore(self.sess,config.model_dir)
-		except:
-			print("[INFO] Cannot find saved checkpoint in {}.".format(config.model_dir))
 
+		# var_list = tf.contrib.framework.get_variables_to_restore(include=["ffm"])
+		# try:
+		# 	saver_to_restore = tf.train.Saver(var_list=var_list)
+		# 	saver_to_restore.restore(self.sess,config.model_dir)
+		# except:
+		# 	print("[WARNING] Cannot load checkpoint from {}.".format(config.model_dir))
+		
 		saver = tf.train.Saver(max_to_keep=2)
 
-		# training
 		for step in range(config.num_epoch):
-			for epoch in range(num_iter_one_epoch):
+			# init training dataset
+			dataset.init_iterator(self.sess,is_training=True)
 
-				batch_data = dataset.get_batch()
-				batch_feature = batch_data[1]
-				batch_label = batch_data[3]
-
-				batch_loss,_,batch_logloss = self.sess.run([self.loss,self.train_op,self.log_loss],
-						feed_dict = {self.features:batch_feature,self.label:batch_label})
+			for iteration in range(num_iter_one_epoch):
+				batch_logloss,_ = \
+					 self.sess.run([logloss,train_op])
 
 				sys.stdout.write("\r")
-				sys.stdout.write("=> [INFO] Process {:.0%} in Step {:d}: [Train] log-loss: {:.5f} <= \r".format(epoch/num_iter_one_epoch, step+1,batch_logloss))
+				sys.stdout.write("=> [INFO] Process {:.0%} in Epoch {:d}: [Train] log-loss: {:.5f} <= \r".format(iteration/num_iter_one_epoch, step+1,batch_logloss))
 				sys.stdout.flush()
+				if iteration == 10:
+					break
 
-			# validation
-			if va_dataset is not None:
-				va_loss = self.sess.run(self.log_loss,
-					feed_dict={self.features:va_data["feature"],self.label:va_data["label"]})
-				print("\n => STEP {}, val_loss: {:.5f} <=".format(step+1,va_loss))
+			if dataset.va_filename is not None:
+				print("\n")
+				# init va dataset
+				dataset.init_iterator(self.sess,is_training=False)
+				va_epoch_loss = 0
+				val_count = 0
+				va_pred = []
+				try:
+					while True:
+						va_b_epoch_loss,va_b_pred = self.sess.run([logloss,pred])
+						va_epoch_loss += va_b_epoch_loss
+						val_count += 1
+						va_pred.extend(va_b_pred.tolist())
 
+				except tf.errors.OutOfRangeError:
+					va_pred = np.array(va_pred)
+					val_auc = roc_auc_score(dataset.all_data[1]["label"],va_pred)
+					print("=> [INFO] STEP {}, [Val] val_loss: {:.5f}, val_auc: {:.3f} <=".format(step+1,va_epoch_loss/val_count,val_auc))
+			
 			# save model
 			saver.save(self.sess,config.model_dir+"/ffm.ckpt",global_step=step+1)
 
-		return
-
-	def _inference(self):
+	def _optimizer(self,loss):
 		config = self.config
-		self.label = tf.placeholder(shape=(None),dtype=tf.float32)
-		self.features = tf.placeholder(shape=(None,config.m),dtype=tf.int32)
+		# build optimizer
+		opt = tf.train.AdamOptimizer(config.learning_rate)
+
+		# build train op
+		params = tf.trainable_variables()
+		gradients = tf.gradients(loss,params,colocate_gradients_with_ops=True)
+		clipped_grads, gradient_norm = tf.clip_by_global_norm(gradients, 5.0)
+		train_op = opt.apply_gradients(zip(clipped_grads, params))
+		return train_op
+
+	def _loss_func(self,pred,label):
+		config = self.config
+
+		with tf.name_scope("l2_loss"):
+			# l2 normalization
+			regularizer = tf.contrib.layers.l2_regularizer(config.l2_norm)
+			reg_term = tf.contrib.layers.apply_regularization(regularizer,weights_list=None)
+
+		with tf.name_scope("logistic_loss"):
+			# logistic loss
+			logit_1 = tf.log(pred + 1e-10)
+			logit_0 = tf.log(1 - pred + 1e-10)
+			log_loss = -1 * tf.reduce_mean(label * logit_1 + (1- label) * logit_0)	
+			# log_loss = tf.losses.log_loss(label,pred,epsilon=1e-10)
+
+		total_loss = log_loss + reg_term
+
+		return total_loss,log_loss
+
+	def _inference(self,feat_tensor):
+		config = self.config
 		with tf.variable_scope("ffm"):
 			with tf.variable_scope("linear"):
 				weights = tf.get_variable("weights",
@@ -81,7 +125,7 @@ class FFM:
 					dtype=tf.float32,
 					initializer=tf.zeros_initializer())
 
-				linear_term = tf.gather(weights,self.features) # [None,m,1]
+				linear_term = tf.gather(weights,feat_tensor) # [None,m,1]
 				linear_term = tf.add(bias, tf.reduce_sum(linear_term,[-1,-2])) # [None,]
 				# linear_term = tf.reduce_sum(linear_term,[-1,-2]) # [None,]
 
@@ -94,7 +138,7 @@ class FFM:
 					dtype=tf.float32,
 					initializer=tf.truncated_normal_initializer(stddev=0.1,mean=0)) # [n,m,k]
 
-				quad_term = tf.gather(embedding,self.features)
+				quad_term = tf.gather(embedding,feat_tensor)
 				quad_term = tf.reduce_sum(quad_term * tf.transpose(quad_term,[0,2,1,3]),-1) # [None,m,m]
 				temp = []
 				for i in range(config.m):
@@ -105,51 +149,65 @@ class FFM:
 				tf.add_to_collection(tf.GraphKeys.WEIGHTS,embedding)
 
 			logit = linear_term + quad_term
-			self.prob = tf.sigmoid(logit)
+			prob = tf.sigmoid(logit)		
 
-	def _loss_func(self):
+		return prob
+
+	def _inference_complex(self,feat_tensor):
+		"""Deprecated, too time-consuming.
+		"""
 		config = self.config
+		with tf.variable_scope("ffm"):
+			with tf.variable_scope("linear"):
+				weights = tf.get_variable("weights",
+					shape=[config.n,1],
+					dtype=tf.float32,
+					initializer=tf.truncated_normal_initializer(stddev=0.1,mean=0))
 
-		with tf.name_scope("l2_loss"):
-			# l2 normalization
-			regularizer = tf.contrib.layers.l2_regularizer(config.l2_norm)
-			reg_term = tf.contrib.layers.apply_regularization(regularizer,weights_list=None)
+				bias = tf.get_variable("bias",
+					shape=[1],
+					dtype=tf.float32,
+					initializer=tf.zeros_initializer())
 
-		with tf.name_scope("logistic_loss"):
-			# logistic loss
-			logit_1 = tf.log(self.prob + 1e-10)
-			logit_0 = tf.log(1 - self.prob + 1e-10)
-			self.log_loss = -1 * tf.reduce_mean(self.label * logit_1 + (1- self.label) * logit_0)
+				linear_term = tf.nn.embedding_lookup(weights,feat_tensor) # None,n,1
+				linear_term = tf.squeeze(linear_term,axis=2)
+				linear_term = tf.add(tf.reduce_sum(linear_term,1),bias)
+				tf.add_to_collection(tf.GraphKeys.WEIGHTS,weights)
+				tf.add_to_collection(tf.GraphKeys.WEIGHTS,bias)
+
+			with tf.variable_scope("quadratic"):
+				embedding = tf.get_variable("embedding",
+					shape=[config.m,config.n,config.k],
+					dtype=tf.float32,
+					initializer=tf.truncated_normal_initializer(stddev=0.1,mean=0)) # [n,m,k]
+				quad_term = None
+				for i in range(config.m):
+					for j in range(i+1,config.m):
+						vi_fj = tf.nn.embedding_lookup(embedding[j], feat_tensor[:,i]) # None,k
+						vj_fi = tf.nn.embedding_lookup(embedding[i], feat_tensor[:,j]) # None,k
+						vij = tf.multiply(vi_fj, vj_fi)
+						if quad_term is None:
+							quad_term = tf.reduce_sum(vij,1)
+						else:
+							quad_term += tf.reduce_sum(vij,1)
+
+				tf.add_to_collection(tf.GraphKeys.WEIGHTS,embedding)
+
+			logit = linear_term + quad_term
+			prob = tf.sigmoid(logit)		
+
+		return prob
 
 
-		self.loss = self.log_loss + reg_term
-
-	def _optimizer(self):
-		config = self.config
-		# build optimizer
-		opt = tf.train.AdagradOptimizer(config.learning_rate)
-
-		# build train op
-		params = tf.trainable_variables()
-		gradients = tf.gradients(self.loss,params,colocate_gradients_with_ops=True)
-		clipped_grads, gradient_norm = tf.clip_by_global_norm(gradients, 5.0)
-		self.grad_norm = gradient_norm
-		self.train_op = opt.apply_gradients(zip(clipped_grads, params))
-
-
-def main():
+def train_ffm():
 	from config import config
+	from dataset import Dataset
 
 	ffm = FFM(config)
-	ffm.build()
-
-	from dataset import DataSet, DatasetTF
 	tr_filename = "data/criteo.tr.r100.gbdt0.ffm"
 	va_filename = "data/criteo.va.r100.gbdt0.ffm"
-	dataset = DataSet(tr_filename,config.batch_size,config.shuffle)
-	va_dataset = DataSet(va_filename)
-
-	ffm.train(dataset,va_dataset)
+	dataset = Dataset(tr_filename,va_filename,config.batch_size,config.shuffle)
+	ffm.train(dataset)
 
 	pdb.set_trace()
 
@@ -157,4 +215,4 @@ def main():
 	return
 
 if __name__ == '__main__':
-	main()
+	train_ffm()
