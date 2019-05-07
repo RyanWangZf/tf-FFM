@@ -3,6 +3,8 @@ import tensorflow as tf
 import numpy as np 
 from sklearn.metrics import roc_auc_score
 
+import time
+
 import sys
 import pdb
 
@@ -48,13 +50,19 @@ class FFM:
             # init training dataset
             dataset.init_iterator(self.sess,is_training=True)
 
+            epoch_start_time = time.time()
             for iteration in range(num_iter_one_epoch):
+                
+                iter_start_time = time.time()
                 batch_logloss,_ = \
                      self.sess.run([logloss,train_op])
+                one_iter_time = time.time() - iter_start_time
 
                 sys.stdout.write("\r")
-                sys.stdout.write("=> [INFO] Process {:.0%} in Epoch {:d}: [Train] log-loss: {:.5f} <= \r".format(iteration/num_iter_one_epoch, step+1,batch_logloss))
+                sys.stdout.write("=> [INFO] Process {:.0%} in Epoch {:d}: [Train] log-loss: {:.5f} one iter {:.1f} sec <= \r".format(
+                        iteration/num_iter_one_epoch, step+1,batch_logloss,one_iter_time))
                 sys.stdout.flush()
+                # debug
                 if iteration == 10:
                     break
 
@@ -75,7 +83,9 @@ class FFM:
                 except tf.errors.OutOfRangeError:
                     va_pred = np.array(va_pred)
                     val_auc = roc_auc_score(dataset.all_data[1]["label"],va_pred)
-                    print("=> [INFO] STEP {}, [Val] val_loss: {:.5f}, val_auc: {:.3f} <=".format(step+1,va_epoch_loss/val_count,val_auc))
+                    epoch_time = time.time() - epoch_start_time
+                    print("=> [INFO] STEP {}, [Val] val_loss: {:.5f}, val_auc: {:.3f} one epoch in {:.1f} sec <=".format(
+                        step+1,va_epoch_loss/val_count,val_auc, epoch_time))
             
             # save model
             saver.save(self.sess,config.model_dir+"/ffm.ckpt",global_step=step+1)
