@@ -2,11 +2,11 @@
 import tensorflow as tf
 import numpy as np 
 from sklearn.metrics import roc_auc_score
-
 import time
-
 import sys
 import pdb
+
+from utils import print_config
 
 # TODO
 # early stop
@@ -15,6 +15,8 @@ import pdb
 class FFM:
     def __init__(self,config):
         self.config = config
+        print_config(config)
+
         # build session
         sess_config = tf.ConfigProto(device_count = {"CPU":self.config.num_cpu},
             inter_op_parallelism_threads=0,
@@ -63,8 +65,8 @@ class FFM:
                         iteration/num_iter_one_epoch, step+1,batch_logloss,one_iter_time))
                 sys.stdout.flush()
                 # debug
-                if iteration == 10:
-                    break
+                # if iteration == 10:
+                #    break
 
             if dataset.va_filename is not None:
                 print("\n")
