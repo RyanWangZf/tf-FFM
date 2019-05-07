@@ -24,11 +24,11 @@ class Dataset(object):
 
         self.train_dataset = tf.data.Dataset.from_tensor_slices((self.feat_plhd,self.label_plhd))
 
-    # create validating dataset
-    if va_filename is not None:
-        self.val_dataset = tf.data.Dataset.from_tensor_slices((self.feat_plhd,self.label_plhd))
-        self._load_and_parse_raw_data(va_filename)
-        self._make_init_op()
+        # create validating dataset
+        if va_filename is not None:
+            self.val_dataset = tf.data.Dataset.from_tensor_slices((self.feat_plhd,self.label_plhd))
+            self._load_and_parse_raw_data(va_filename)
+            self._make_init_op()
 
     def get_batch(self):
         return self.next_element
